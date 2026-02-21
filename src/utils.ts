@@ -1,4 +1,4 @@
-import { isCls, inCls, getClsName, skip } from '@gershy/clearing';
+import { inCls } from '@gershy/clearing';
 
 type MaybePromise<T> = T | Promise<T>;
 export const then = (val: MaybePromise<any>, rsv = (v => v), rjc = ((e): any => { throw e; })) => {
