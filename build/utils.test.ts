@@ -17,7 +17,7 @@ export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal
     
     const len0 = v0[count]();
     const len1 = v1[count]();
-    if (len0 !== len1) return { equal: false, path, reason: 'arr count', len0, len1 };
+    if (len0 !== len1) return { equal: false, path, reason: 'arr size', len0, len1 };
     
     for (let i = 0; i < len0; i++) {
       const eq = equal(v0[i], v1[i], [ ...path, i ]);
@@ -32,7 +32,7 @@ export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal
     
     const len0 = v0[count]();
     const len1 = v1[count]();
-    if (len0 !== len1) return { equal: false, path, reason: 'obj count', len0, len1 };
+    if (len0 !== len1) return { equal: false, path, reason: 'obj size', len0, len1 };
     
     for (const k in v0) {
       if (!v1[has](k)) return { equal: false, path: [ ...path, k ], reason: 'obj key', key: k, obj0: 'present', obj1: 'absent' } ;
@@ -47,7 +47,7 @@ export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal
   
   if (cls0 === Set) {
     
-    if (v0.size !== v1.size) return { equal: false, path, reason: 'set count', len0: v0.size, len1: v1.size };
+    if (v0.size !== v1.size) return { equal: false, path, reason: 'set size', len0: v0.size, len1: v1.size };
     for (const v of v0)
       if (!v1.has(v))
         return { equal: false, path, reason: 'set inclusion', val: v, set0: 'present', set1: 'absent' };
@@ -58,7 +58,7 @@ export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal
   
   if (cls0 === Map) {
     
-    if (v0.size !== v1.size) return { equal: false, path, reason: 'map count', len0: v0.size, len1: v1.size };
+    if (v0.size !== v1.size) return { equal: false, path, reason: 'map size', len0: v0.size, len1: v1.size };
     
     for (const [ k, v ] of v0) {
       if (!v1.has(k)) return { equal: false, path: [ ...path, k ], reason: 'map key', key: k, map0: 'present', map1: 'absent' };
@@ -67,6 +67,17 @@ export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal
       if (!eq.equal) return eq;
     }
     
+    return { equal: true };
+    
+  }
+  
+  if (cls0 === Buffer) {
+    
+    if (v0.length !== v1.length) return { equal: false, path, reason: 'buffer size', len0: v0.length, len1: v1.length };
+    for (let i = 0; i < v0.length; i++) {
+      const eq = equal(v0[i], v1[i], [ ...path, i ]);
+      if (!eq.equal) return eq;
+    }
     return { equal: true };
     
   }
