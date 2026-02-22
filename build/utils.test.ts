@@ -9,7 +9,6 @@ export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal
   const cls1 = getCls(v1);
   
   if (cls0 !== cls1)    return { equal: false, path, reason: 'class', cls0: getClsName(v0), cls1: getClsName(v1) };
-  if (cls0 === null)    return { equal: false, path, reason: 'identity', v0, v1 };
   if (cls0 === String)  return { equal: false, path, reason: 'identity', v0, v1 };
   if (cls0 === Number)  return { equal: false, path, reason: 'identity', v0, v1 };
   if (cls0 === Boolean) return { equal: false, path, reason: 'identity', v0, v1 };

@@ -7,11 +7,17 @@ import * as utils from './utils.ts';
 
 type Lock = { type: string, fp: Fp, prm: PromiseLater };
 type LineageLock = { fp: Fp, prm: PromiseLater };
+type PartialIterator<T> = {
+  [Symbol.asyncIterator](): AsyncGenerator<T, any, any>,
+  close():                  Promise<void>,
+  prm:                      Promise<void>
+};
 
 const fs = (() => {
   
   type FsPrm = (typeof nodeFs)['promises'] & Pick<typeof nodeFs, 'createReadStream' | 'createWriteStream'>;
   return ({ ...nodeFs.promises, ...nodeFs[slice]([ 'createReadStream', 'createWriteStream' ]) } as FsPrm)
+  
     [map]((fsVal: any, name): any => {
       
       if (!inCls(fsVal, Function)) return fsVal;
@@ -46,7 +52,7 @@ export class Fp {
     if (!isCls(vals, Array)) vals = [ vals ];
     
     vals = vals
-      [map](cmp => { if (!cmp.split) console.log({ cmp }); return cmp.split(/[/\\]+/); }) // Each String is broken into its components
+      [map](cmp => cmp.split(/[/\\]+/)) // Each String is broken into its components
       .flat(1);                         // Finally flatten into flat list of components
     
     const illegalCmp = vals[find](val => Fp.illegalComponentRegex.test(val)).val;
@@ -137,7 +143,7 @@ export interface AbstractSys {
   remNode: (fp: Fp) => Promise<void>,
   getDataSetterStreamAndFinalizePrm: (lineageLocks: LineageLock[], fp: Fp) => Promise<{ stream: Writable, prm: Promise<void> }>,
   getDataGetterStreamAndFinalizePrm: (fp: Fp) => Promise<{ stream: Readable, prm: Promise<void> }>,
-  getKidIteratorAndFinalizePrm: (fp: Fp, opts?: { map: Fn, bufferSize: number }) => Promise<{ iterator: () => Generator<Fp>, prm: Promise<void> }>
+  getKidIteratorAndFinalizePrm: (fp: Fp, opts?: { map: Fn, bufferSize: number }) => Promise<PartialIterator<string>>
   
 };
 export class FileSys implements AbstractSys {
@@ -323,11 +329,13 @@ export class FileSys implements AbstractSys {
     await retry({
       attempts: 5,
       opts: { delay: n => n * 50 },
-      fn: () => fs.rm(fp.fsp(), { recursive: true }).catch(err => {
-        if (err.code === 'ENOENT') return;                         // Success - nonexistence is the desired state
-        if (err.code === 'EPERM')  throw err[mod]({ retry: true }); // Retry on EPERM
-        throw err;
-      })
+      fn: n => {
+        return fs.rm(fp.fsp(), { recursive: true }).catch(err => {
+          if (err.code === 'ENOENT') return;                         // Success - nonexistence is the desired state
+          if (err.code === 'EPERM')  throw err[mod]({ retry: true }); // Retry on EPERM
+          throw err;
+        })
+      }
     });
     
     await this.remEmptyAncestors(fp.par());
@@ -401,25 +409,15 @@ export class FileSys implements AbstractSys {
     
     if (type === 'node') {
       
-      const stream = new Readable();
-      const prm = new Promise<void>((rsv, rjc) => { stream.on('close', rsv); stream.on('error', rjc); });
-      
-      (async () => {
-        
-        const dir = await fs.readdir(fp.fsp());
-        stream.push(JSON.stringify(dir.filter(cmp => cmp !== '~')));
-        stream.push(null);
-        
-      })();
-      
-      return { stream, prm };
+      // Try recursing into the "~" dir
+      return this.getDataGetterStreamAndFinalizePrm(fp.kid('~'));
       
     }
     
     throw Error('invalid type')[mod]({ fp, type });
     
   }
-  async getKidIteratorAndFinalizePrm(fp: Fp, { map=v=>v, bufferSize=150 }={} as { map: Fn, bufferSize: number }) {
+  async getKidIteratorAndFinalizePrm(fp: Fp, { bufferSize=150 }={} as { bufferSize?: number }) {
     
     const dir = await fs.opendir(fp.fsp(), { bufferSize }).catch(err => {
       if (err.code === 'ENOENT') return null; // `null` represents no children
@@ -428,21 +426,22 @@ export class FileSys implements AbstractSys {
     
     if (!dir) return {
       // No yields; immediate completion
-      iterator: { async* [Symbol.asyncIterator]() {}, async close() {} } as any,
+      async* [Symbol.asyncIterator](): AsyncGenerator<string> {},
+      async close() {},
       prm: Promise.resolve()
     };
     
     const prm = Promise[later]<void>();
-    const iterator = {
-      [Symbol.asyncIterator]: async function*() {
-        for await (const ent of dir) {
-          if (ent.name === '~') continue;
-          const r = map(ent.name);
-          if (r !== skip) yield r;
-        }
+    return {
+      async* [Symbol.asyncIterator](): AsyncGenerator<string> {
+        
+        for await (const ent of dir)
+          if (ent.name !== '~')
+            yield ent.name
         prm.resolve();
+        
       },
-      close: async () => {
+      async close() {
         
         await new Promise<void>((rsv, rjc) => dir.close(err => err ? rjc(err) : rsv()))
           .catch(err => {
@@ -451,10 +450,9 @@ export class FileSys implements AbstractSys {
           })
           .then(prm.resolve, prm.reject);
         
-      }
+      },
+      prm
     };
-    
-    return { iterator, prm };
     
   }
   
@@ -536,7 +534,7 @@ export class Tx {
     throw Error(`collision type "${collTypeKey}" not implemented`);
     
   }
-  async doLocked<Fn extends () => any>({ name='?', locks=[], fn, err }: { name: string, locks: any[], fn: Fn, err?: any }): Promise<ReturnType<Fn>> {
+  async doLocked<Fn extends () => any>({ name='?', locks=[], fn, err }: { name: string, locks: any[], fn: Fn, err?: any }): Promise<Awaited<ReturnType<Fn>>> {
     
     if (!this.active) throw Error('inactive transaction');
     
@@ -645,14 +643,14 @@ export class Tx {
     }});
     
   }
-  async setData(fp: Fp, data: null | string | Buffer, opts?: any) {
+  async setData(fp: Fp, data: null | string | Buffer) {
     
     this.checkFp(fp);
     
     if (!data?.length) {
       
-      // Writing `null` implies a system-level delete (because reading a non-existing system file
-      // resolves to `null`!)
+      // Writing `null` implies a system-level delete (consider that reading a non-existing system
+      // file resolves to `null`!)
       
       return this.doLocked({ name: 'setLeafEmpty', locks: [{ type: 'nodeWrite', fp }], fn: async () => {
         
@@ -745,7 +743,7 @@ export class Tx {
       
     }});
     
-    return streamPrm.then(stream => Object.assign(stream as any, { prm }));
+    return streamPrm.then(stream => Object.assign(stream, { prm }));
     
   }
   
@@ -768,21 +766,33 @@ export class Tx {
     }});
     
   }
-  async iterateNode(fp: Fp, { map=v=>v, bufferSize=150 }={}) {
+  async iterateNode(fp: Fp, { bufferSize=150 }={}) {
     
     this.checkFp(fp);
     
-    const itPrm = Promise[later]<any>();
+    const itPrm = Promise[later]<PartialIterator<string>>();
     
     const prm = this.doLocked({ name: 'iterateNode', locks: [{ type: 'nodeRead', fp }], fn: async () => {
       
-      const { iterator, prm } = await this.provider.getKidIteratorAndFinalizePrm(fp, { map, bufferSize });
+      const iterator = await this.provider.getKidIteratorAndFinalizePrm(fp, { bufferSize });
       itPrm.resolve(iterator);
-      await prm;
+      await iterator.prm;
       
     }});
     
-    return itPrm.then(it => Object.assign(it as any, { prm }));
+    const tx = this;
+    return itPrm.then(it => ({
+      
+      async* [Symbol.asyncIterator]() {
+        
+        for await (const fd of it)
+          yield new Ent(fp.kid(fd), { tx });
+        
+      },
+      close() { return it.close(); },
+      prm
+      
+    }));
     
   }
   
@@ -854,38 +864,38 @@ export class Ent {
   async getData(opts: 'utf8'):   Promise<string>;
   async getData(opts: 'base64'): Promise<string>;
   async getData(opts: 'json'):   Promise<Json>;
-  async getData(opts: { encoding: null   }):   Promise<Buffer>;
-  async getData(opts: { encoding: 'utf8' }):   Promise<string>;
-  async getData(opts: { encoding: 'base64' }): Promise<string>;
-  async getData(opts: { encoding: 'json' }):   Promise<Json>;
   async getData(opts?: EncodeTerm | { encoding: EncodeTerm }) {
     
-    if (!isCls(opts, Object)) opts = { encoding: opts ?? null };
-    const { encoding: enc } = opts;
-    
-    if (enc === 'json') opts = { ...opts, encoding: null };
-    
-    const content = await this.tx.getData(this.fp, opts);
+    const content = await this.tx.getData(this.fp, opts === 'json' ? null : opts);
     if (!content.length) {
-      if (enc === null) return Buffer.alloc(0);
-      if (enc === 'utf8') return '';
-      if (enc === 'base64') return '';
-      if (enc === 'json') return null;
-      if (enc === 'utf8') return '';
+      if (opts === null)     return Buffer.alloc(0);
+      if (opts === 'utf8')   return '';
+      if (opts === 'base64') return '';
+      if (opts === 'json')   return null;
     }
-      
-    if (enc === 'json') return JSON.parse(content);
+    
+    if (opts === 'json') return JSON.parse(content);
     
     return content;
     
   }
-  async setData(content: null | string | Buffer | Json, opts: EncodeTerm | { encoding?: EncodeTerm } = {}) {
+  
+  // When opts are omitted, Buffer becomes an option, and strings remain in utf8
+  async setData(data: null | string | Buffer, opts?: null);
+  async setData(data: null | string,          opts: 'utf8');
+  async setData(data: null | string,          opts: 'base64');
+  async setData(data: Json,                   opts: 'json');
+  async setData(data, opts: any = null) {
     
-    if (isCls(opts, String)) opts = { encoding: opts };
+    const dat = (() => {
+      
+      if (opts === null)   return data;
+      if (opts === 'json') return JSON.stringify(data);
+      return Buffer.from(data as string, opts);
+      
+    })();
     
-    const { encoding=null } = opts ?? {};
-    if (encoding === 'json') [ opts, content ] = [ { ...opts, encoding: 'utf8' }, JSON.stringify(content) ];
-    return this.tx.setData(this.fp, content as string, opts);
+    return this.tx.setData(this.fp, dat);
     
   }
   async getDataBytes() { return this.tx.getDataBytes(this.fp); }
@@ -896,6 +906,9 @@ export class Ent {
   async getKids(): Promise<Obj<Ent>> {
     const names = await this.tx.getKidNames(this.fp);
     return names[toObj](name => [ name, this.kid([ name ]) ]);
+  }
+  kids() {
+    return this.tx.iterateNode(this.fp);
   }
   toString() { return this.fp.toString(); }
   
