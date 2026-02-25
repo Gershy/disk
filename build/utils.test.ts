@@ -9,9 +9,30 @@ export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal
   const cls1 = getCls(v1);
   
   if (cls0 !== cls1)    return { equal: false, path, reason: 'class', cls0: getClsName(v0), cls1: getClsName(v1) };
-  if (cls0 === String)  return { equal: false, path, reason: 'identity', v0, v1 };
   if (cls0 === Number)  return { equal: false, path, reason: 'identity', v0, v1 };
   if (cls0 === Boolean) return { equal: false, path, reason: 'identity', v0, v1 };
+  
+  if (cls0 === String)  {
+    
+    let mismatchInd = 0;
+    while (v0[mismatchInd] === v1[mismatchInd]) mismatchInd++;
+    if (v0.length > 100 || v1.length > 100) {
+      
+      [ v0, v1 ] = [ v0, v1 ].map(v => {
+        
+        return [
+          v.slice(0, mismatchInd),
+          `<MISMATCH>${v[mismatchInd] ?? '[eof]'}</MISMATCH>`,
+          v.slice(mismatchInd + 1)
+        ].join('');
+        
+      });
+      
+    }
+    
+    return { equal: false, path, reason: 'identity', mismatchInd, v0, v1 };
+    
+  }
   
   if (cls0 === Array) {
     

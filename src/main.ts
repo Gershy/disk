@@ -224,53 +224,38 @@ export class DiskSys implements AbstractSys {
     if (type === null) {
       
       const nullReadable = new Readable();
-      
-      (async () => {
-        nullReadable.push(null);
-      })();
-      
+      (async () => nullReadable.push(null))();
       return { stream: nullReadable, prm: Promise.resolve() };
       
     }
     
-    if (type === 'leaf') {
-      
-      const err = Error();
-      const stream = fs.createReadStream(fp.fsp());
-      const prm = new Promise<void>((rsv, rjc) => {
-        stream.on('close', rsv);
-        stream.on('error', (cause: any) => {
-          
-          // ENOENT indicates the stream should return no data, successfully
-          if (cause.code === 'ENOENT') return rsv();
-          
-          // ERR_STREAM_PREMATURE_CLOSE unwantedly propagates to the top-level; it should reject
-          // like any other error, but need to:
-          // 1. Suppress to prevent top-level crash
-          // 2. Wrap in a separate error which is then thrown; this ensures the error will crash
-          //    at the top-level if it is unhandled
-          if (cause.code === 'ERR_STREAM_PREMATURE_CLOSE') {
-            cause.suppress();
-            cause = err[mod]({ msg: 'broken stream likely caused by unexpected client socket disruption', cause });
-          }
-          
-          return rjc(cause);
-          
-        });
+    if (type === 'node') return this.getDataGetterStreamAndFinalizePrm(fp.kid('~')); // Recurse into the "~" dir
+    
+    const err = Error();
+    const stream = fs.createReadStream(fp.fsp());
+    const prm = new Promise<void>((rsv, rjc) => {
+      stream.on('close', rsv);
+      stream.on('error', (cause: any) => {
+        
+        // ENOENT indicates the stream should return no data, successfully
+        if (cause.code === 'ENOENT') return rsv();
+        
+        // ERR_STREAM_PREMATURE_CLOSE unwantedly propagates to the top-level; it should reject
+        // like any other error, but need to:
+        // 1. Suppress to prevent top-level crash
+        // 2. Wrap in a separate error which is then thrown; this ensures the error will crash
+        //    at the top-level if it is unhandled
+        if (cause.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+          cause.suppress();
+          cause = err[mod]({ msg: 'broken stream likely caused by unexpected client socket disruption', cause });
+        }
+        
+        return rjc(cause);
+        
       });
-      
-      return { stream, prm };
-      
-    }
+    });
     
-    if (type === 'node') {
-      
-      // Try recursing into the "~" dir
-      return this.getDataGetterStreamAndFinalizePrm(fp.kid('~'));
-      
-    }
-    
-    throw Error('invalid type')[mod]({ fp, type });
+    return { stream, prm };
     
   }
   async getKidIteratorAndFinalizePrm(fp: Fp, { bufferSize = 150 }: { bufferSize?: number } = {}) {

@@ -1,6 +1,5 @@
 import nodeFs from 'node:fs';
-import { inCls } from '@gershy/clearing';
-import * as utils from './utils.ts';
+import { inCls, safe } from '@gershy/clearing';
 
 export default (() => {
   
@@ -16,7 +15,7 @@ export default (() => {
       return (...args) => {
         
         const err = Error();
-        return utils.safe(
+        return safe(
           () => fsVal(...args),
           cause => err[fire]({ cause, msg: `Failed low-level ${name} on "${args[0]}"` })
         );
