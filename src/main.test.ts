@@ -1,6 +1,7 @@
-import { assertEqual } from '../build/utils.test.ts';
-import { Ent } from './setup.ts';
-import { rootEnt } from './main.ts';
+import { assertEqual, cmpAny } from '../build/utils.test.ts';
+import { Fact } from './setup.ts';
+import { rootFact } from './main.ts';
+import fs from 'node:fs/promises';
 
 // Type testing
 (async () => {
@@ -16,18 +17,18 @@ import { rootEnt } from './main.ts';
 // Test cases
 (async () => {
   
-  const isolated = async (fn: (ent: Ent) => Promise<void>) => {
+  const isolated = async (fn: (fact: Fact) => Promise<void>) => {
     
-    let ent: null | Ent = null;
+    let fact: null | Fact = null;
     try {
       
-      ent = await rootEnt.kid([ import.meta.dirname, '.isolatedTest' ], { newTx: true });
-      await fn(ent);
+      fact = await rootFact.kid([ import.meta.dirname, '.isolatedTest' ], { newTx: true });
+      await fn(fact);
       
     } finally {
       
-      await ent?.rem();
-      ent?.tx.end();
+      await fact?.rem();
+      fact?.tx.end();
       
     }
     
@@ -38,10 +39,11 @@ import { rootEnt } from './main.ts';
     
     {
       name: 'basic string data',
-      fn: () => isolated(async ent => {
+      fn: () => isolated(async fact => {
         
-        await ent.kid('val').setData('hello');
-        const val = await ent.kid('val').getData('str');
+        const data = fact.kid([ 'data' ]);
+        await data.setData('hello');
+        const val = await data.getData('str');
         
         assertEqual(val, 'hello');
         
@@ -49,10 +51,11 @@ import { rootEnt } from './main.ts';
     },
     {
       name: 'basic json data',
-      fn: () => isolated(async ent => {
+      fn: () => isolated(async fact => {
         
-        await ent.kid('val').setData({ a: 'b', x: 'y' });
-        const val = await ent.kid('val').getData('json');
+        const data = fact.kid([ 'data' ])
+        await data.setData({ a: 'b', x: 'y' });
+        const val = await data.getData('json');
         
         assertEqual(val, { a: 'b', x: 'y' });
         
@@ -60,19 +63,20 @@ import { rootEnt } from './main.ts';
     },
     {
       name: 'basic overwrite',
-      fn: () => isolated(async ent => {
+      fn: () => isolated(async fact => {
         
+        const kid = fact.kid([ 'val' ]);
         await Promise.all([
           
-          ent.kid('val').setData({ a: 1, b: 2 }),
-          ent.kid('val').setData({ a: 1, b: 3 }),
-          ent.kid('val').setData({ a: 1, b: 4 }),
-          ent.kid('val').setData({ a: 1, b: 5 }),
-          ent.kid('val').setData({ a: 1, b: 6 }),
+          kid.setData({ a: 1, b: 2 }),
+          kid.setData({ a: 1, b: 3 }),
+          kid.setData({ a: 1, b: 4 }),
+          kid.setData({ a: 1, b: 5 }),
+          kid.setData({ a: 1, b: 6 }),
           
         ]);
         
-        const val = await ent.kid('val').getData('json');
+        const val = await kid.getData('json');
         
         assertEqual(val, { a: 1, b: 6 });
         
@@ -80,13 +84,15 @@ import { rootEnt } from './main.ts';
     },
     {
       name: 'leaf to node conversion',
-      fn: () => isolated(async ent => {
+      fn: () => isolated(async fact => {
         
-        await ent.kid('par')    .setData({ desc: 'par node' });
-        await ent.kid('par/kid').setData({ desc: 'kid node' });
+        const par = fact.kid([ 'par' ]);
+        const kid = par .kid([ 'kid' ]);
+        await par.setData({ desc: 'par node' });
+        await kid.setData({ desc: 'kid node' });
         
-        const parData = await ent.kid('par').getData('json');
-        const kidData = await ent.kid('par/kid').getData('json');
+        const parData = await par.getData('json');
+        const kidData = await kid.getData('json');
         
         assertEqual({ parData, kidData }, {
           parData: { desc: 'par node' },
@@ -97,12 +103,13 @@ import { rootEnt } from './main.ts';
     },
     {
       name: 'data head stream',
-      fn: () => isolated(async ent => {
+      fn: () => isolated(async fact => {
         
-        const headStream = await ent.kid('data').getDataHeadStream();
+        const data = fact.kid([ 'data' ]);
+        const headStream = await data.getDataHeadStream();
         
         // Note this read is expected to wait for the head stream to be ended
-        const valPrm = ent.kid('data').getData('str');
+        const valPrm = data.getData('str');
         await sleep(5);
         
         headStream.write('111');
@@ -122,12 +129,78 @@ import { rootEnt } from './main.ts';
       })
     },
     {
+      name: 'data head stream on directory',
+      fn: () => isolated(async fact => {
+        
+        const par = fact.kid([ 'dir' ]);
+        
+        // Force `par` to be a dir
+        await par.kid([ 'kid' ]).setData('this is a kid');
+        
+        const headStream = await par.getDataHeadStream();
+        headStream.write('[streamed]');
+        headStream.write('[into]');
+        headStream.write('[dir]');
+        headStream.end();
+        
+        assertEqual(await par.getData('str'), '[streamed][into][dir]');
+        
+      })
+    },
+    {
+      name: 'data head stream with no content leaves no traces',
+      fn: () => isolated(async fact => {
+        
+        const data = fact.kid([ 'par1', 'par2', 'par3', 'data' ]);
+        const fsp = data.fsp();
+        const headStream = await data.getDataHeadStream();
+        headStream.end();
+        
+        assertEqual(await data.getData('json'), null);
+        assertEqual(
+          await fs.stat(fsp).then(
+            val => ({ success: true, stat: val }),
+            err => ({ success: false, err })
+          ),
+          {
+            success: false,
+            err: Error(`ENOENT: no such file or directory, stat '${fsp}'`)[mod]({
+              code: 'ENOENT',
+              errno: cmpAny,
+              syscall: cmpAny,
+              path: fsp
+            })
+          }
+        );
+        
+      })
+    },
+    {
+      name: 'data head stream missing parent dirs',
+      fn: () => isolated(async fact => {
+        
+        const data = fact.kid([ 'par1', 'par2', 'par3', 'data' ]);
+        const headStream = await data.getDataHeadStream();
+        headStream.write('[streamed]');
+        headStream.write('[into]');
+        headStream.write('[dir]');
+        headStream.end();
+        
+        assertEqual(
+          await data.getData('str'),
+          '[streamed][into][dir]'
+        );
+        
+      })
+    },
+    {
       name: 'data tail stream',
-      fn: () => isolated(async ent => {
+      fn: () => isolated(async fact => {
         
-        await ent.kid('data').setData('abc'.repeat(1000));
+        const data = fact.kid([ 'data' ]);
+        await data.setData('abc'.repeat(1000));
         
-        const readStream = await ent.kid('data').getDataTailStream();
+        const readStream = await data.getDataTailStream();
         const chunks: any[] = [];
         readStream.on('data', d => chunks.push(d));
         await readStream.prm;
@@ -138,47 +211,50 @@ import { rootEnt } from './main.ts';
     },
     {
       name: 'get kids',
-      fn: () => isolated(async ent => {
+      fn: () => isolated(async fact => {
         
         await Promise.all(
-          (50)[toArr](v => ent.kid(`par/kid${v}`).setData(v.toString(10)))
+          (50)[toArr](v => fact.kid([ 'par', `kid${v}` ]).setData(v.toString(10)))
         );
         
-        const kids = await ent.kid('par').getKids();
-        assertEqual(kids[map](kid => kid.toString()), (50)[toObj](v => [ `kid${v}`, `${ent.toString()}/par/kid${v}` ]));
+        const kids = await fact.kid([ 'par' ]).getKids();
+        assertEqual(
+          kids[map](kid => kid.toString()),
+          (50)[toObj](v => [ `kid${v}`, `${fact.toString()}/par/kid${v}`
+        ]));
         
       })
     },
     {
       name: 'iterate kids',
-      fn: () => isolated(async ent => {
+      fn: () => isolated(async fact => {
         
         await Promise.all(
-          (50)[toArr](v => ent.kid(`par/kid${v}`).setData(v.toString(10)))
+          (50)[toArr](v => fact.kid([ 'par', `kid${v}` ]).setData(v.toString(10)))
         );
         
-        const kids: Ent[] = [];
-        for await (const kid of await ent.kid('par').kids())
+        const kids: Fact[] = [];
+        for await (const kid of await fact.kid([ 'par' ]).kids())
           // Note there are no guarantees for iteration order
           kids.push(kid);
         
         assertEqual(
           new Set(kids[map](kid => kid.toString())),
-          new Set((50)[toArr](v => `${ent.toString()}/par/kid${v}`))
+          new Set((50)[toArr](v => `${fact.toString()}/par/kid${v}`))
         );
         
       })
     },
     {
       name: 'iterate kids with interrupt',
-      fn: () => isolated(async ent => {
+      fn: () => isolated(async fact => {
         
         await Promise.all(
-          (50)[toArr](v => ent.kid(`par/kid${v}`).setData(v.toString(10)))
+          (50)[toArr](v => fact.kid([ 'par', `kid${v}` ]).setData(v.toString(10)))
         );
         
-        const kids: Ent[] = [];
-        const kidIt = await ent.kid('par').kids();
+        const kids: Fact[] = [];
+        const kidIt = await fact.kid([ 'par' ]).kids();
         let cnt = 0;
         for await (const kid of kidIt) {
           kids.push(kid);
@@ -193,16 +269,16 @@ import { rootEnt } from './main.ts';
     },
     {
       name: 'encoding',
-      fn: () => isolated(async ent => {
+      fn: () => isolated(async fact => {
         
-        const dataEnt = ent.kid('data');
+        const data = fact.kid([ 'data' ]);
         
         const assertEmptyAllEncodings = async () => {
           
           const vals = await Promise[allObj]({
-            str:  dataEnt.getData('str'),
-            bin:  dataEnt.getData('bin'),
-            json: dataEnt.getData('json')
+            str:  data.getData('str'),
+            bin:  data.getData('bin'),
+            json: data.getData('json')
           });
           assertEqual(vals, {
             str:  '',
@@ -214,12 +290,12 @@ import { rootEnt } from './main.ts';
         
         await assertEmptyAllEncodings();
         
-        await dataEnt.setData('[1,2,3,{"x":"y"}]');
+        await data.setData('[1,2,3,{"x":"y"}]');
         assertEqual(
           await Promise[allObj]({
-            str:  dataEnt.getData('str'),
-            bin:  dataEnt.getData('bin'),
-            json: dataEnt.getData('json')
+            str:  data.getData('str'),
+            bin:  data.getData('bin'),
+            json: data.getData('json')
           }),
           {
             str: '[1,2,3,{"x":"y"}]',
@@ -228,15 +304,15 @@ import { rootEnt } from './main.ts';
           }
         );
         
-        await dataEnt.setData('');
+        await data.setData('');
         await assertEmptyAllEncodings();
         
-        await dataEnt.setData(Buffer.from([ 0, 1, 2, 3, 4, 5 ]));
+        await data.setData(Buffer.from([ 0, 1, 2, 3, 4, 5 ]));
         assertEqual(
           await Promise[allObj]({
-            str:  dataEnt.getData('str'),
-            bin:  dataEnt.getData('bin'),
-            json: dataEnt.getData('json').then(
+            str:  data.getData('str'),
+            bin:  data.getData('bin'),
+            json: data.getData('json').then(
               val => ({ success: true, val }),
               err => ({ success: false, err })
             )
@@ -253,16 +329,16 @@ import { rootEnt } from './main.ts';
           }
         );
         
-        await dataEnt.setData(Buffer.alloc(0));
+        await data.setData(Buffer.alloc(0));
         await assertEmptyAllEncodings();
         
-        await dataEnt.setData('hellooo');
+        await data.setData('hellooo');
         assertEqual(
-          await dataEnt.getData('bin'),
+          await data.getData('bin'),
           Buffer.from('hellooo')
         );
         
-        await dataEnt.setData(null);
+        await data.setData(null);
         await assertEmptyAllEncodings();
         
       })

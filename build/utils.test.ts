@@ -1,9 +1,12 @@
 import { inCls, getCls, getClsName } from '@gershy/clearing';
 
+export const cmpAny = Symbol('@gershy/test/cmp/any');
+
 export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal: true } | { equal: false, path: (string | number)[], [K: string]: any } => {
   
-  if (v0 === v1)                return { equal: true };
-  if (v0 == null || v1 == null) return { equal: false, path, reason: 'identity', v0, v1 };
+  if (v0 === v1)                      return { equal: true };
+  if (v0 == null || v1 == null)       return { equal: false, path, reason: 'identity', v0, v1 };
+  if (v0 === cmpAny || v1 === cmpAny) return { equal: true };
   
   const cls0 = getCls(v0);
   const cls1 = getCls(v1);
@@ -51,9 +54,9 @@ export const equal = (v0: any, v1: any, path: (string | number)[] = []): { equal
   
   if (cls0 === Object) {
     
-    const len0 = v0[count]();
-    const len1 = v1[count]();
-    if (len0 !== len1) return { equal: false, path, reason: 'obj size', len0, len1 };
+    const keys0 = v0[toArr]((v, k) => k).sort();
+    const keys1 = v1[toArr]((v, k) => k).sort();
+    if (!equal(keys0, keys1).equal) return { equal: false, path, reason: 'obj keys', keys0, keys1 };
     
     for (const k in v0) {
       if (!v1[has](k)) return { equal: false, path: [ ...path, k ], reason: 'obj key', key: k, obj0: 'present', obj1: 'absent' } ;

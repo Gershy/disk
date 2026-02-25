@@ -1,11 +1,11 @@
 import nodePath from 'node:path';
-import { AbstractSys, Fp, LineageLock, Tx } from './setup.ts';
-import fs from './fs.ts';
+import { Lore, Fp, LineageLock, Scholar } from './setup.ts';
+import fs, { wrapFsError } from './fs.ts';
 import retry from '@gershy/retry';
 import { isCls } from '@gershy/clearing';
 import { Readable } from 'node:stream';
 
-export class DiskSys implements AbstractSys {
+export class DiskLore implements Lore {
   
   static defaultDataCmp =  '~';
   static getTmpCmp = () => `~${(Number[int32] * Math.random())[toStr](String[base32], 7)}`;
@@ -26,7 +26,7 @@ export class DiskSys implements AbstractSys {
     throw Error('unexpected filesystem entity')[mod]({ stat });
     
   }
-  async swapLeafToNode(fp: Fp, { tmpCmp=DiskSys.getTmpCmp() }={}) {
+  async swapLeafToNode(fp: Fp, { tmpCmp=DiskLore.getTmpCmp() }={}) {
     
     // We want a dir to replace an existing file (without reads on that previously existing file to
     // fail) - so we replace the file with a directory containing a "default data file"
@@ -36,7 +36,7 @@ export class DiskSys implements AbstractSys {
     
     const fsp = fp.fsp();                              // Path to original file
     const tmpFsp = fp.sib(tmpCmp).fsp();               // Path to temporary file (sibling of original file)
-    const valFsp = fp.kid(DiskSys.defaultDataCmp).fsp(); // Path to final file
+    const valFsp = fp.kid(DiskLore.defaultDataCmp).fsp(); // Path to final file
     
     await fs.rename(fsp, tmpFsp);    // Move file out of the way
     await fs.mkdir(fsp);             // Set directory where file used to be
@@ -208,16 +208,52 @@ export class DiskSys implements AbstractSys {
       });
     
   }
-  async getDataSetterStreamAndFinalizePrm(lineageLocks: LineageLock[], fp: Fp) {
+  async getHeadStreamAndFinalizePrm(lineageLocks: LineageLock[], fp: Fp) {
     
     await this.ensureLineageLocks(lineageLocks);
     
-    const stream = fs.createWriteStream(fp.fsp());
-    const prm = new Promise<void>((rsv, rjc) => { stream.on('close', rsv); stream.on('error', rjc); });
+    const type = await this.getType(fp);
+    if (type === 'node') fp = fp.kid('~');
+    
+    const err = Error('');
+    const fsStream = fs.createWriteStream(fp.fsp());
+    
+    let didWrite = false;
+    const stream = {
+      
+      // TODO: What about backpressure? If we use the synchronous `fsStream.write` method then
+      // chunks will still be flushed in order (Writable guarantees this internally), but we are
+      // subject to backpressure issues - i.e., `fsStream.write` returns `false`, and we need to
+      // wait for a "drain" event before writing more
+      
+   // write: async (data: string | Buffer) => { if (data.length) didWrite = true; return new Promise<void>((rsv, rjc) => fsStream.write(data, err => err ? rjc(err) : rsv())); },
+      write: async (data: string | Buffer) => { if (data.length) didWrite = true; void fsStream.write(data); },
+      end:   async ()                      => { fsStream.end(); await prm; }
+      
+    };
+    
+    const prm = new Promise<void>((rsv, rjc) => {
+      fsStream.on('close', rsv);
+      fsStream.on('error', rjc);
+    })
+      .catch(cause => wrapFsError(err, { cause, name: 'createWriteStream', fsp: fp.fsp() }))
+      .finally(async () => {
+        
+        if (didWrite) return;
+        
+        const stat = await this.safeStat(fp);
+        if (!stat?.isFile()) return;
+        if (stat.size > 0)   return;
+        
+        await this.remNode(fp);
+        await this.remEmptyAncestors(fp.par());
+        
+      });
+    
     return { stream, prm };
     
   }
-  async getDataGetterStreamAndFinalizePrm(fp: Fp) {
+  async getTailStreamAndFinalizePrm(fp: Fp) {
     
     const type = await this.getType(fp);
     
@@ -229,7 +265,7 @@ export class DiskSys implements AbstractSys {
       
     }
     
-    if (type === 'node') return this.getDataGetterStreamAndFinalizePrm(fp.kid('~')); // Recurse into the "~" dir
+    if (type === 'node') return this.getTailStreamAndFinalizePrm(fp.kid('~')); // Recurse into the "~" dir
     
     const err = Error();
     const stream = fs.createReadStream(fp.fsp());
@@ -299,6 +335,9 @@ export class DiskSys implements AbstractSys {
   
 };
 
-export const rootFileSys = new DiskSys();
-export const rootTx = new Tx(rootFileSys, []);
-export const rootEnt = rootTx.getEnt();
+export const rootDiskLore = new DiskLore();
+export const rootTx = new Scholar(rootDiskLore, []);
+export const rootFact = rootTx.getEnt();
+
+export      { Fp, Fact, Scholar } from './setup.ts';
+export type { Lore }              from './setup.ts';

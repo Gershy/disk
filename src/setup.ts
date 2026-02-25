@@ -1,6 +1,6 @@
 import nodePath, { PlatformPath } from 'node:path';
 import { Stats } from 'node:fs';
-import { Readable, Writable } from 'node:stream';
+import { Readable } from 'node:stream';
 import { isCls, getClsName, skip } from '@gershy/clearing';
 
 export type Lock = { type: string, fp: Fp, prm: PromiseLater };
@@ -22,7 +22,7 @@ export class Fp {
   private path: PlatformPath;
   public cmps: string[];
   public fspVal: null | string;
-  constructor(vals: string | string[], path=nodePath) {
+  constructor(vals: string[], path=nodePath) {
     
     if (!isCls(vals, Array)) vals = [ vals ];
     
@@ -96,7 +96,11 @@ export class Fp {
   
 };
 
-export interface AbstractSys {
+type Writable = {
+  write: (data: string | Buffer) => Promise<void>,
+  end:   ()                      => Promise<void>
+};
+export interface Lore {
   
   safeStat: (fp: Fp) => Promise<null | Stats>, // TODO: AbstractSys shouldn't think of this in terms of "stat" - it should just return metadata like byte-size and entity type
   getType: (fp: Fp) => Promise<null | 'leaf' | 'node'>,
@@ -122,24 +126,24 @@ export interface AbstractSys {
   getKidCmps: (fp: Fp) => Promise<string[]>,
   remEmptyAncestors: (fp: Fp) => Promise<void>,
   remNode: (fp: Fp) => Promise<void>,
-  getDataSetterStreamAndFinalizePrm: (lineageLocks: LineageLock[], fp: Fp) => Promise<{ stream: Writable, prm: Promise<void> }>,
-  getDataGetterStreamAndFinalizePrm: (fp: Fp) => Promise<{ stream: Readable, prm: Promise<void> }>,
+  getHeadStreamAndFinalizePrm: (lineageLocks: LineageLock[], fp: Fp) => Promise<{ stream: Writable, prm: Promise<void> }>,
+  getTailStreamAndFinalizePrm: (fp: Fp) => Promise<{ stream: Readable, prm: Promise<void> }>,
   getKidIteratorAndFinalizePrm: (fp: Fp, opts?: { bufferSize: number }) => Promise<PartialIterator<string>>
   
 };
 
-export class Tx<Sys extends AbstractSys> {
+export class Scholar<L extends Lore> {
   
   public fp: Fp;
-  private sys: AbstractSys;
+  private lore: Lore;
   private locks: Set<Lock>;
   private active: boolean;
   private endFns: Array<(...args: any[]) => any>;
   
-  constructor(sys: Sys, fp: Fp | string | string[] = []) {
+  constructor(lore: L, fp: string[] | Fp = []) {
     
-    this.fp = isCls(fp, Fp) ? (fp as Fp) : new Fp(fp as string | string[]);
-    this.sys = sys;
+    this.fp = isCls(fp, Array) ? new Fp(fp) : fp;
+    this.lore = lore;
     this.locks = new Set();
     this.active = true;
     this.endFns = [];
@@ -149,7 +153,7 @@ export class Tx<Sys extends AbstractSys> {
   toString() { return `${getClsName(this)} @ ${this.fp.toString()}`; }
   
   getEnt() {
-    return new Ent(this, this.fp);
+    return new Fact(this, this.fp);
   }
   checkFp(fp: Fp) {
     if (!this.fp.contains(fp))            throw Error('fp is not contained within the transaction')[mod]({ fp, tx: this });
@@ -235,7 +239,7 @@ export class Tx<Sys extends AbstractSys> {
     finally      { for (const lock of locks) lock.prm.resolve(); } // Force any remaining Locks to resolve
     
   }
-  async transact<T>({ name='?', fp, fn }: { name: string, fp: Fp, fn: (tx: Tx<Sys>) => Promise<T> }) {
+  async transact<T>({ name='?', fp, fn }: { name: string, fp: Fp, fn: (tx: Scholar<L>) => Promise<T> }) {
     
     // Maybe functions can pass in a whole bunch of initial locks with various bounding; the caller
     // can end these locks whenever they see fit (and `doLocked` can simply remove entries from
@@ -258,28 +262,28 @@ export class Tx<Sys extends AbstractSys> {
       //   existence initially and if existing, immediately resolve all locks and short-circuit; or
       //   maybe just binary-search the lineage chain for the first non-existing node? in this case
       //   need to be careful to release the locks at the appropriate times)
-      await this.sys.ensureLineageLocks(lineageLocks);
+      await this.lore.ensureLineageLocks(lineageLocks);
       
-      const tx = new Tx(this.sys, fp);
+      const tx = new Scholar(this.lore, fp);
       try {
         const result = await fn(tx);
-        await this.sys.remEmptyAncestors(fp.par());
+        await this.lore.remEmptyAncestors(fp.par());
         return result;
       } finally { tx.end(); }
       
     }});
     
   }
-  async kid(fp: Fp | string | string[]) {
+  async kid(fp: string[] | Fp) {
     
     // Returns `Promise<KidTransaction>`; example usage:
     //    | const kidTx = await rootTx.kid('C:/isolated');
     //    | // ... do a bunch of stuff with `kidTx` ...
     //    | kidTx.end();
     
-    if (!isCls(fp, Fp)) fp = new Fp(fp);
+    if (isCls(fp, Array)) fp = new Fp(fp);
     
-    const kidPrm = Promise[later]<Tx<Sys>>();
+    const kidPrm = Promise[later]<Scholar<L>>();
     this.transact({ name: 'kid', fp, fn: tx => {
       
       kidPrm.resolve(tx);
@@ -297,7 +301,7 @@ export class Tx<Sys extends AbstractSys> {
   async getType(fp: Fp) {
     
     this.checkFp(fp);
-    return this.doLocked({ name: 'getType', locks: [{ type: 'nodeRead', fp }], fn: () => this.sys.getType(fp) });
+    return this.doLocked({ name: 'getType', locks: [{ type: 'nodeRead', fp }], fn: () => this.lore.getType(fp) });
     
   }
   async getDataBytes(fp: Fp) {
@@ -305,12 +309,12 @@ export class Tx<Sys extends AbstractSys> {
     this.checkFp(fp);
     return this.doLocked({ name: 'getDataBytes', locks: [{ type: 'nodeRead', fp }], fn: async () => {
       
-      const stat = await this.sys.safeStat(fp);
+      const stat = await this.lore.safeStat(fp);
       if (stat === null) return 0;
       if (stat.isFile()) return stat.size;
       
       // At this point `fp` is a directory; try to read the "~" file; any error results in 0 size
-      const tildeStat = await this.sys.safeStat(fp.kid('~'));
+      const tildeStat = await this.lore.safeStat(fp.kid('~'));
       return tildeStat?.size ?? 0;
       
     }});
@@ -338,7 +342,7 @@ export class Tx<Sys extends AbstractSys> {
       
       return this.doLocked({ name: 'setLeafEmpty', locks: [{ type: 'nodeWrite', fp }], fn: async () => {
         
-        const type = await this.sys.getType(fp);
+        const type = await this.lore.getType(fp);
         if (type === null) return;
         
         const unlinkFp = {
@@ -346,8 +350,8 @@ export class Tx<Sys extends AbstractSys> {
           node: () => fp.kid('~') // For nodes try to unlink the "~" child
         }[type]();
         
-        await this.sys.remNode(unlinkFp);
-        await this.sys.remEmptyAncestors(unlinkFp!.par());
+        await this.lore.remNode(unlinkFp);
+        await this.lore.remEmptyAncestors(unlinkFp!.par());
         
       }});
       
@@ -361,7 +365,7 @@ export class Tx<Sys extends AbstractSys> {
       
       return this.doLocked({ name: 'setData', locks: [ ...lineageLocks, nodeLock ], fn: async () => {
         
-        await this.sys.setData(lineageLocks, fp, data);
+        await this.lore.setData(lineageLocks, fp, data);
         
       }});
       
@@ -373,7 +377,7 @@ export class Tx<Sys extends AbstractSys> {
     this.checkFp(fp);
     
     return this.doLocked({ name: 'getData', locks: [{ type: 'nodeRead', fp }], fn: async () => {
-      return this.sys.getData(fp, enc);
+      return this.lore.getData(fp, enc);
     }});
     
   }
@@ -391,7 +395,7 @@ export class Tx<Sys extends AbstractSys> {
     const prm = this.doLocked({ name: 'getHeadStream', locks: [ ...lineageLocks, nodeLock ], fn: async () => {
       
       // Ensure lineage
-      const { stream, prm } = await this.sys.getDataSetterStreamAndFinalizePrm(lineageLocks, fp);
+      const { stream, prm } = await this.lore.getHeadStreamAndFinalizePrm(lineageLocks, fp);
       
       // Expose the stream immediately
       streamPrm.resolve(stream);
@@ -419,7 +423,7 @@ export class Tx<Sys extends AbstractSys> {
     const nodeLock = { type: 'nodeRead', fp };
     const prm = this.doLocked({ name: 'getTailStream', locks: [ nodeLock ], fn: async () => {
       
-      const { stream, prm } = await this.sys.getDataGetterStreamAndFinalizePrm(fp);
+      const { stream, prm } = await this.lore.getTailStreamAndFinalizePrm(fp);
       streamPrm.resolve(stream); // Pass the initialized stream to the caller
       await prm;
       
@@ -434,7 +438,7 @@ export class Tx<Sys extends AbstractSys> {
     this.checkFp(fp);
     return this.doLocked({ name: 'getKidNames', locks: [{ type: 'nodeRead', fp }], fn: async () => {
       
-      return this.sys.getKidCmps(fp);
+      return this.lore.getKidCmps(fp);
       
     }});
     
@@ -444,7 +448,7 @@ export class Tx<Sys extends AbstractSys> {
     this.checkFp(fp);
     
     return this.doLocked({ name: 'remSubtree', locks: [{ type: 'subtreeWrite', fp }], err: Error(''), fn: async () => {
-      return this.sys.remSubtree(fp);
+      return this.lore.remSubtree(fp);
     }});
     
   }
@@ -456,7 +460,7 @@ export class Tx<Sys extends AbstractSys> {
     
     const prm = this.doLocked({ name: 'iterateNode', locks: [{ type: 'nodeRead', fp }], fn: async () => {
       
-      const iterator = await this.sys.getKidIteratorAndFinalizePrm(fp, { bufferSize });
+      const iterator = await this.lore.getKidIteratorAndFinalizePrm(fp, { bufferSize });
       itPrm.resolve(iterator);
       await iterator.prm;
       
@@ -468,7 +472,7 @@ export class Tx<Sys extends AbstractSys> {
       async* [Symbol.asyncIterator]() {
         
         for await (const fd of it)
-          yield new Ent(tx, fp.kid(fd));
+          yield new Fact(tx, fp.kid(fd));
         
       },
       close() { return it.close(); },
@@ -491,7 +495,7 @@ export class Tx<Sys extends AbstractSys> {
   
 };
 
-export class Ent {
+export class Fact {
   
   // I think the rightful philosophy is to deny traversal from Kid -> Par; to access a shallower
   // Ent, need access to some Ent shallow enough to contain that Ent - note a `par` function
@@ -499,11 +503,11 @@ export class Ent {
   // already use `new Ent(ent.tx.fp).kid(...)` to access anything within the transaction)
   
   public fp: Fp;
-  public tx: Tx<AbstractSys>;
+  public tx: Scholar<Lore>;
   
-  constructor(tx: Tx<AbstractSys>, fp: string | string[] | Fp) {
+  constructor(tx: Scholar<Lore>, fp: string[] | Fp) {
     
-    if (isCls(fp, String) || isCls(fp, Array)) fp = new Fp(fp);
+    if (isCls(fp, Array)) fp = new Fp(fp);
     for (const cmp of fp.cmps) if (/^[~]+$/.test(cmp)) throw Error('Illegal cmp must include char other than "~"')[mod]({ fp, cmp });
     
     this.fp = fp;
@@ -513,29 +517,29 @@ export class Ent {
   
   getCmps() { return this.fp.cmps; }
   
-  kid(relFp: string | string[]): Ent;
-  kid(relFp: string | string[], enc: {}): Ent;
-  kid(relFp: string | string[], enc: { newTx: false }): Ent;
-  kid(relFp: string | string[], enc: { newTx: true }): Promise<Ent>;
-  kid(relFp: string | string[], enc?: { newTx?: boolean }): Promise<Ent> | Ent {
+  kid(relFp: string[]): Fact;
+  kid(relFp: string[], enc: {}): Fact;
+  kid(relFp: string[], enc: { newTx: false }): Fact;
+  kid(relFp: string[], enc: { newTx: true }): Promise<Fact>;
+  kid(relFp: string[], enc?: { newTx?: boolean }): Promise<Fact> | Fact {
     
     const kidFp = this.fp.kid(relFp);
     if (enc?.newTx) {
       
-      return this.tx.kid(kidFp).then(tx => new Ent(tx, kidFp)) as Promise<Ent> as any;
+      return this.tx.kid(kidFp).then(tx => new Fact(tx, kidFp)) as Promise<Fact> as any;
       
     } else {
       
-      return new Ent(this.tx, kidFp);
+      return new Fact(this.tx, kidFp);
       
     }
     
   }
-  par(): Ent {
+  par(): Fact {
     
     if (this.tx.fp.equals(this.fp)) throw Error('parent is outside transaction');
     
-    return new Ent(this.tx, this.fp.par());
+    return new Fact(this.tx, this.fp.par());
     
   }
   
@@ -556,7 +560,7 @@ export class Ent {
   async rem() { return this.tx.remSubtree(this.fp); }
   async getDataHeadStream() { return this.tx.getDataHeadStream(this.fp); }
   async getDataTailStream() { return this.tx.getDataTailStream(this.fp); }
-  async getKids(): Promise<Obj<Ent>> {
+  async getKids(): Promise<Obj<Fact>> {
     const names = await this.tx.getKidNames(this.fp);
     return names[toObj](name => [ name, this.kid([ name ]) ]);
   }
@@ -564,5 +568,6 @@ export class Ent {
     return this.tx.iterateNode(this.fp);
   }
   toString() { return this.fp.toString(); }
+  fsp() { return this.fp.fsp(); }
   
 };
